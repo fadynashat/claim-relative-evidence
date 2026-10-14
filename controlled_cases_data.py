@@ -1,156 +1,96 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Reproducible controlled cases A-I for the EWDA/P1 evidence model.
+
+Implements the four models in the manuscript appendix and checks numerical
+references, boundaries, malformed inputs, classifications, and deletion bounds.
+Run: python3 controlled_cases_data_hardened.py
 """
-Controlled test cases A-I for:
-"Claim-Relative Evidence Quality and Support in AI-Augmented Legacy Modernization"
-
-This script reproduces every numeric value reported in Appendix A of the paper
-and runs independent sanity checks on:
-  - input validation (including NaN and Infinity)
-  - raw weights
-  - numerical eligibility
-  - aggregate outputs
-  - classifications
-  - removal-sensitivity bounds
-  - boundary cases
-
-Every check function returns a Boolean. The runner aggregates all results
-into a single OVERALL verdict and exits with a non-zero status on failure.
-
-Run with: python3 controlled_cases_data.py
-"""
-
+from __future__ import annotations
 import math
-from typing import List, Tuple, Dict, Optional, Callable
-
-
-# ============================================================
-# 0. Explicit type aliases
-# ============================================================
-
-AggregateResult = Optional[float]
-Classification = str  # Supported | Contradicted | Undetermined | Abstain
-
-
-# ============================================================
-# 1. Fixed configuration (matches Appendix A.1)
-# ============================================================
+from typing import Any, Optional
 
 K = 3
-CRITICAL_DIMENSIONS = [0, 1]
-TAU_C = 0.30
-TAU_W = 0.40
-THETA_MINUS = -0.20
-THETA_PLUS = 0.20
+CRITICAL_DIMENSIONS = (0, 1)  # zero-based: q_1 and q_2
+TAU_C, TAU_W = 0.30, 0.40
+THETA_MINUS, THETA_PLUS = -0.20, 0.20
+MODELS = ("M0", "M1", "M1'", "M2")
+STATUSES = {"ACCEPTED", "REJECTED", "PENDING"}
+Aggregate = Optional[float]
 
 
-# ============================================================
-# 2. Core functions
-# ============================================================
-
-def raw_weight(q: Tuple[float, ...]) -> float:
-    """Raw geometric-mean weight, Definition 4.2."""
-    product = 1.0
-    for qi in q:
-        product *= qi
-    return product ** (1.0 / len(q))
+def valid_number(x: Any, lo: float, hi: float) -> bool:
+    return (not isinstance(x, bool) and isinstance(x, (int, float))
+            and math.isfinite(x) and lo <= x <= hi)
 
 
-def numerical_eligibility(q: Tuple[float, ...]) -> int:
-    """Numerical eligibility indicator A(e,c), Definition 4.3."""
-    for i in CRITICAL_DIMENSIONS:
-        if q[i] < TAU_C:
-            return 0
+def valid_q(q: Any) -> bool:
+    return isinstance(q, tuple) and len(q) == K and all(valid_number(x, 0.0, 1.0) for x in q)
+
+
+def raw_weight(q: tuple[float, ...]) -> float:
+    """Geometric mean; validates its own domain rather than trusting callers."""
+    if not valid_q(q):
+        raise ValueError(f"Q must be a tuple of {K} finite values in [0,1]")
+    return math.prod(q) ** (1.0 / K)
+
+
+def numerical_eligibility(q: tuple[float, ...]) -> int:
+    if not valid_q(q):
+        raise ValueError(f"Q must be a tuple of {K} finite values in [0,1]")
+    if any(q[i] < TAU_C for i in CRITICAL_DIMENSIONS):
+        return 0
     if max(q) < TAU_W:
         return 0
-    if raw_weight(q) <= 0.0:
-        return 0
-    return 1
+    return int(raw_weight(q) > 0.0)
 
 
-def validate_inputs(items: List[Dict]) -> bool:
-    """
-    Validate that every evidence item conforms to the model's domain.
-
-    Rejects:
-      - tuples of wrong length
-      - non-numeric values (including bool)
-      - NaN or +/-Infinity
-      - Q values outside [0, 1]
-      - s values outside [-1, 1]
-      - unknown status strings
-    """
-    for idx, it in enumerate(items):
-        q = it.get("Q")
-        s = it.get("s")
-        status = it.get("status")
-
-        # --- Q validation ---
-        if not isinstance(q, tuple) or len(q) != K:
-            print(f"  INPUT ERROR: item {idx} has invalid Q shape: {q}")
+def validate_inputs(items: Any) -> bool:
+    if not isinstance(items, list):
+        return False
+    required = {"Q", "s", "status"}
+    for item in items:
+        if not isinstance(item, dict) or not required.issubset(item):
             return False
-        for qi in q:
-            if (isinstance(qi, bool)
-                    or not isinstance(qi, (int, float))
-                    or not math.isfinite(qi)
-                    or not (0.0 <= qi <= 1.0)):
-                print(f"  INPUT ERROR: item {idx} has invalid Q: {q}")
-                return False
-
-        # --- s validation ---
-        if (isinstance(s, bool)
-                or not isinstance(s, (int, float))
-                or not math.isfinite(s)
-                or not (-1.0 <= s <= 1.0)):
-            print(f"  INPUT ERROR: item {idx} has invalid s: {s}")
+        if not valid_q(item["Q"]):
             return False
-
-        # --- status validation ---
-        if status not in ("ACCEPTED", "REJECTED", "PENDING"):
-            print(f"  INPUT ERROR: item {idx} has invalid status: {status}")
+        if not valid_number(item["s"], -1.0, 1.0):
             return False
-
+        if not isinstance(item["status"], str) or item["status"] not in STATUSES:
+            return False
     return True
 
 
-def aggregate(items: List[Dict], model: str) -> AggregateResult:
-    """Compute S_M(c). Returns float, or None for the undefined state (⊥)."""
-    numerator = 0.0
-    denominator = 0.0
+def contribution(item: dict, model: str) -> Optional[tuple[float, float]]:
+    q, s, status = item["Q"], item["s"], item["status"]
+    if model == "M0":
+        return 1.0, float(s)
+    if model == "M1":
+        return raw_weight(q), float(s)
+    if model == "M1'":
+        return (raw_weight(q), float(s)) if status == "ACCEPTED" else None
+    if model == "M2":
+        return (raw_weight(q), float(s)) if status == "ACCEPTED" and numerical_eligibility(q) else None
+    raise ValueError(f"Unknown model: {model}")
 
-    for it in items:
-        q = it["Q"]
-        s = it["s"]
-        status = it["status"]
 
-        if model == "M0":
-            w = 1.0
-        elif model == "M1":
-            w = raw_weight(q)
-        elif model == "M1'":
-            if status != "ACCEPTED":
-                continue
-            w = raw_weight(q)
-        elif model == "M2":
-            if status != "ACCEPTED":
-                continue
-            if numerical_eligibility(q) != 1:
-                continue
-            w = raw_weight(q)
-        else:
-            raise ValueError(f"Unknown model: {model}")
-
+def aggregate(items: list[dict], model: str) -> Aggregate:
+    if model not in MODELS:
+        raise ValueError(f"Unknown model: {model}")
+    if not validate_inputs(items):
+        raise ValueError("Invalid evidence inputs")
+    numerator = denominator = 0.0
+    for item in items:
+        part = contribution(item, model)
+        if part is None:
+            continue
+        w, s = part
         numerator += w * s
         denominator += w
-
-    if denominator == 0.0:
-        return None
-    return numerator / denominator
+    return None if denominator == 0.0 else numerator / denominator
 
 
-def classify(value: AggregateResult) -> Classification:
-    """Map aggregate to Supported / Contradicted / Undetermined / Abstain (⊥)."""
+def classify(value: Aggregate) -> str:
     if value is None:
         return "Abstain"
     if value >= THETA_PLUS:
@@ -160,406 +100,92 @@ def classify(value: AggregateResult) -> Classification:
     return "Undetermined"
 
 
-def fmt(value: AggregateResult, decimals: int = 4) -> str:
-    if value is None:
-        return "⊥"
-    return f"{value:.{decimals}f}"
+def fmt(value: Aggregate, places: int = 4) -> str:
+    return "⊥" if value is None else f"{value:.{places}f}"
 
 
-# ============================================================
-# 3. Case definitions (matches Appendix A.2)
-# ============================================================
-
-CASES: Dict[str, List[Dict]] = {
-    "A": [
-        {"Q": (0.9, 0.9, 0.8), "s": +0.8, "status": "ACCEPTED"},
-        {"Q": (0.8, 0.8, 0.9), "s": +0.6, "status": "ACCEPTED"},
-    ],
-    "B": [
-        {"Q": (0.9, 0.9, 0.8), "s": +0.8, "status": "ACCEPTED"},
-        {"Q": (0.2, 0.9, 0.8), "s": -0.9, "status": "ACCEPTED"},
-    ],
-    "C": [
-        {"Q": (0.9, 0.9, 0.8), "s": +0.8, "status": "ACCEPTED"},
-        {"Q": (0.9, 0.25, 0.9), "s": +0.9, "status": "ACCEPTED"},
-    ],
-    "D": [
-        {"Q": (0.9, 0.9, 0.8), "s": +0.8, "status": "ACCEPTED"},
-        {"Q": (0.8, 0.8, 0.9), "s": -0.8, "status": "ACCEPTED"},
-    ],
-    "E": [
-        {"Q": (0.2, 0.9, 0.8), "s": +0.8, "status": "ACCEPTED"},
-        {"Q": (0.1, 0.1, 0.1), "s": -0.9, "status": "ACCEPTED"},
-    ],
-    "F": [
-        {"Q": (0.31, 0.9, 0.8), "s": +0.8, "status": "ACCEPTED"},
-        {"Q": (0.29, 0.9, 0.8), "s": +0.7, "status": "ACCEPTED"},
-    ],
-    "G": [
-        {"Q": (0.9, 0.9, 0.8), "s": +0.8, "status": "ACCEPTED"},
-        {"Q": (0.8, 0.8, 0.9), "s": +0.6, "status": "ACCEPTED"},
-    ],
-    "H": [
-        {"Q": (0.9, 0.9, 0.8), "s": +0.8, "status": "ACCEPTED"},
-        {"Q": (0.9, 0.9, 0.3), "s": +0.7, "status": "ACCEPTED"},
-    ],
-    "I": [
-        {"Q": (0.9, 0.9, 0.8), "s": +0.8, "status": "ACCEPTED"},
-        {"Q": (0.8, 0.8, 0.9), "s": +0.6, "status": "REJECTED"},
-    ],
+CASES = {
+ "A": [{"Q":(0.9,0.9,0.8),"s":0.8,"status":"ACCEPTED"},{"Q":(0.8,0.8,0.9),"s":0.6,"status":"ACCEPTED"}],
+ "B": [{"Q":(0.9,0.9,0.8),"s":0.8,"status":"ACCEPTED"},{"Q":(0.2,0.9,0.8),"s":-0.9,"status":"ACCEPTED"}],
+ "C": [{"Q":(0.9,0.9,0.8),"s":0.8,"status":"ACCEPTED"},{"Q":(0.9,0.25,0.9),"s":0.9,"status":"ACCEPTED"}],
+ "D": [{"Q":(0.9,0.9,0.8),"s":0.8,"status":"ACCEPTED"},{"Q":(0.8,0.8,0.9),"s":-0.8,"status":"ACCEPTED"}],
+ "E": [{"Q":(0.2,0.9,0.8),"s":0.8,"status":"ACCEPTED"},{"Q":(0.1,0.1,0.1),"s":-0.9,"status":"ACCEPTED"}],
+ "F": [{"Q":(0.31,0.9,0.8),"s":0.8,"status":"ACCEPTED"},{"Q":(0.29,0.9,0.8),"s":0.7,"status":"ACCEPTED"}],
+ "G": [{"Q":(0.9,0.9,0.8),"s":0.8,"status":"ACCEPTED"},{"Q":(0.8,0.8,0.9),"s":0.6,"status":"ACCEPTED"}],
+ "H": [{"Q":(0.9,0.9,0.8),"s":0.8,"status":"ACCEPTED"},{"Q":(0.9,0.9,0.3),"s":0.7,"status":"ACCEPTED"}],
+ "I": [{"Q":(0.9,0.9,0.8),"s":0.8,"status":"ACCEPTED"},{"Q":(0.8,0.8,0.9),"s":0.6,"status":"REJECTED"}],
 }
 
-MODELS = ["M0", "M1", "M1'", "M2"]
+EXPECTED = {
+ "A":{"M0":.7000,"M1":.7020,"M1'":.7020,"M2":.7020},
+ "B":{"M0":-.0500,"M1":.1587,"M1'":.1587,"M2":.8000},
+ "C":{"M0":.8500,"M1":.8404,"M1'":.8404,"M2":.8000},
+ "D":{"M0":.0000,"M1":.0157,"M1'":.0157,"M2":.0157},
+ "E":{"M0":-.0500,"M1":.5276,"M1'":.5276,"M2":None},
+ "F":{"M0":.7500,"M1":.7506,"M1'":.7506,"M2":.8000},
+ "G":{"M0":.7000,"M1":.7020,"M1'":.7020,"M2":.7020},
+ "H":{"M0":.7500,"M1":.7581,"M1'":.7581,"M2":.7581},
+ "I":{"M0":.7000,"M1":.7020,"M1'":.8000,"M2":.8000},
+}
 
 
-# ============================================================
-# 4. Removal-sensitivity computation for case G
-# ============================================================
-
-def removal_sensitivity_G() -> Dict[str, Dict[str, object]]:
-    results: Dict[str, Dict[str, object]] = {}
-
+def removal_sensitivity(items: list[dict], index: int) -> dict[str, dict[str, Aggregate]]:
+    if not validate_inputs(items):
+        raise ValueError("Invalid evidence inputs")
+    if isinstance(index, bool) or not isinstance(index, int):
+        raise TypeError("index must be an integer")
+    if not 0 <= index < len(items):
+        raise IndexError("index out of range")
+    reduced = items[:index] + items[index+1:]
+    result = {}
     for model in MODELS:
-        items = CASES["G"]
-        s_before = aggregate(items, model)
-        s_after = aggregate([items[0]], model)
-
-        if model == "M0":
-            w_removed = 1.0
-            W_before = float(len(items))
+        before, after = aggregate(items, model), aggregate(reduced, model)
+        parts = [contribution(item, model) for item in items]
+        total = sum(p[0] for p in parts if p is not None)
+        removed = parts[index]
+        if before is None or after is None:
+            delta = bound = None
         else:
-            w_removed = raw_weight(items[1]["Q"])
-            W_before = sum(raw_weight(it["Q"]) for it in items)
-
-        if s_before is None or s_after is None:
-            results[model] = {
-                "before": s_before, "after": s_after,
-                "actual_change": None, "bound": None,
-            }
-            continue
-
-        results[model] = {
-            "before": s_before,
-            "after": s_after,
-            "actual_change": abs(s_before - s_after),
-            "bound": 2.0 * w_removed / W_before,
-        }
-    return results
+            delta = abs(before-after)
+            bound = 0.0 if removed is None or total == 0 else 2.0*removed[0]/total
+        result[model] = {"before":before,"after":after,"delta":delta,"bound":bound}
+    return result
 
 
-# ============================================================
-# 5. Reporting tables
-# ============================================================
-
-def print_raw_weights_and_eligibility() -> None:
-    print("\n" + "=" * 78)
-    print("TABLE A.2 — Raw weights and numerical eligibility")
-    print("=" * 78)
-    print(f"{'Case':<6}{'Evidence':<10}{'w_raw':>16}{'A':>6}")
-    print("-" * 78)
-    for case_name, items in CASES.items():
-        for idx, it in enumerate(items):
-            w = raw_weight(it["Q"])
-            a = numerical_eligibility(it["Q"])
-            print(f"{case_name:<6}{'e'+str(idx+1):<10}{w:>16.10f}{a:>6}")
-    print("=" * 78)
+def close(actual: Aggregate, expected: Aggregate, tol: float=5e-4) -> bool:
+    if expected is None:
+        return actual is None
+    return actual is not None and abs(actual-expected) < tol
 
 
-def print_aggregates() -> None:
-    print("\n" + "=" * 78)
-    print("TABLE A.3 — Computed outputs for cases A-I")
-    print("=" * 78)
-    print(f"{'Case':<8}" + "".join(f"{m:>14}" for m in MODELS))
-    print("-" * 78)
-    for case_name, items in CASES.items():
-        row = f"{case_name:<8}"
-        for model in MODELS:
-            row += f"{fmt(aggregate(items, model)):>14}"
-        print(row)
-    print("=" * 78)
+def run_checks() -> bool:
+    checks: list[tuple[str,bool]] = []
+    checks.append(("valid cases and malformed input", all(validate_inputs(v) for v in CASES.values()) and all(not validate_inputs(x) for x in [None, {}, [None], [{}], [{"Q":(1,2),"s":0,"status":"ACCEPTED"}], [{"Q":(1,1,True),"s":0,"status":"ACCEPTED"}], [{"Q":(1,1,float('nan')),"s":0,"status":"ACCEPTED"}], [{"Q":(1,1,float('inf')),"s":0,"status":"ACCEPTED"}], [{"Q":(1,1,1),"s":True,"status":"ACCEPTED"}], [{"Q":(1,1,1),"s":0,"status":None}], [{"Q":(1,1,1),"status":"ACCEPTED"}]])))
+    weight_refs=[((.9,.9,.8),.8653497422),((.8,.8,.9),.8320335292),((.2,.9,.8),.5241482788),((.9,.25,.9),.5872301462),((.1,.1,.1),.1),((.31,.9,.8),.6065939346),((.29,.9,.8),.5932578563),((.9,.9,.3),.6240251469)]
+    weight_ok=all(abs(raw_weight(q)-e)<1e-9 for q,e in weight_refs)
+    for q in [(),(.2,.3),(.2,.3,1.2),(.2,.3,float('nan'))]:
+        try: raw_weight(q); weight_ok=False
+        except ValueError: pass
+    checks.append(("raw weights and domain guards",weight_ok))
+    elig=[((.9,.9,.8),1),((.2,.9,.8),0),((.9,.25,.9),0),((.1,.1,.1),0),((.31,.9,.8),1),((.29,.9,.8),0),((.9,.9,.3),1),((0,.9,.9),0),((.30,.9,.8),1),((.9,.30,.8),1),((.9,.9,.40),1),((.35,.35,.35),0),((.40,.30,.30),1)]
+    checks.append(("eligibility including boundaries",all(numerical_eligibility(q)==e for q,e in elig)))
+    class_refs=[(.7,"Supported"),(-.3,"Contradicted"),(0,"Undetermined"),(.2,"Supported"),(-.2,"Contradicted"),(.19,"Undetermined"),(-.19,"Undetermined"),(None,"Abstain")]
+    checks.append(("classification boundaries",all(classify(v)==e for v,e in class_refs)))
+    checks.append(("aggregate outputs A-I",all(close(aggregate(CASES[c],m),EXPECTED[c][m]) for c in EXPECTED for m in MODELS)))
+    sens=removal_sensitivity(CASES['G'],1)
+    checks.append(("removal bound for case G",all(r['delta'] is not None and r['bound'] is not None and r['delta'] <= r['bound']+1e-12 for r in sens.values())))
+    si=removal_sensitivity(CASES['I'],1)
+    checks.append(("model-specific removal accounting",si["M1'"]["delta"]==0 and si["M1'"]["bound"]==0 and si['M2']["delta"]==0 and si['M2']["bound"]==0))
+    print("AGGREGATE OUTPUTS")
+    print(f"{'Case':<8}"+''.join(f"{m:>10}" for m in MODELS))
+    for c,items in CASES.items(): print(f"{c:<8}"+''.join(f"{fmt(aggregate(items,m)):>10}" for m in MODELS))
+    print("\nREMOVAL SENSITIVITY — G, remove e2")
+    for m,r in sens.items(): print(f"{m:4} before={fmt(r['before'],6)} after={fmt(r['after'],6)} delta={fmt(r['delta'],6)} bound={fmt(r['bound'],6)}")
+    print("\nCHECK SUMMARY")
+    for name,ok in checks: print(f"{'PASS' if ok else 'FAIL'}  {name}")
+    passed=all(ok for _,ok in checks)
+    print("OVERALL:","ALL CHECKS PASSED" if passed else "SOME CHECKS FAILED")
+    return passed
 
-
-def print_classifications() -> None:
-    print("\n" + "=" * 78)
-    print("TABLE A.4 — Classification thresholds: "
-          "theta_minus = -0.20, theta_plus = 0.20 (inclusive)")
-    print("=" * 78)
-    print(f"{'Case':<8}" + "".join(f"{m:>16}" for m in MODELS))
-    print("-" * 78)
-    for case_name, items in CASES.items():
-        row = f"{case_name:<8}"
-        for model in MODELS:
-            row += f"{classify(aggregate(items, model)):>16}"
-        print(row)
-    print("=" * 78)
-
-
-def print_removal_case_G() -> None:
-    print("\n" + "=" * 78)
-    print("TABLE A.5 — Removal-sensitivity for case G (remove e_2)")
-    print("=" * 78)
-    print(f"{'Model':<8}{'S_before':>12}{'S_after':>12}"
-          f"{'|Δ|':>12}{'Bound':>14}")
-    print("-" * 78)
-    for model, r in removal_sensitivity_G().items():
-        if r["before"] is None or r["after"] is None:
-            print(f"{model:<8}{'⊥':>12}{'⊥':>12}{'—':>12}{'—':>14}")
-        else:
-            print(f"{model:<8}{r['before']:>12.6f}{r['after']:>12.6f}"
-                  f"{r['actual_change']:>12.6f}{r['bound']:>14.6f}")
-    print("=" * 78)
-
-
-# ============================================================
-# 6. Independent sanity checks — all return Boolean
-# ============================================================
-
-def check_input_validation() -> bool:
-    """Verify that valid inputs pass and invalid inputs are rejected."""
-    print("\n" + "-" * 78)
-    print("CHECK 0 — Input validation")
-    print("-" * 78)
-
-    all_ok = True
-
-    # Valid inputs
-    for case_name, items in CASES.items():
-        if not validate_inputs(items):
-            print(f"  FAIL: case {case_name} rejected as invalid")
-            all_ok = False
-    if all_ok:
-        print("  PASS: all 9 cases accepted as valid inputs")
-
-    # Invalid inputs
-    bad_cases = [
-        ([{"Q": (0.9, 0.9), "s": 0.5, "status": "ACCEPTED"}], "wrong Q length"),
-        ([{"Q": (0.9, 0.9, 1.5), "s": 0.5, "status": "ACCEPTED"}], "Q > 1"),
-        ([{"Q": (0.9, 0.9, -0.1), "s": 0.5, "status": "ACCEPTED"}], "Q < 0"),
-        ([{"Q": (0.9, 0.9, 0.8), "s": 1.5, "status": "ACCEPTED"}], "s > 1"),
-        ([{"Q": (0.9, 0.9, 0.8), "s": 0.5, "status": "UNKNOWN"}], "bad status"),
-        ([{"Q": (0.9, 0.9, 0.8), "s": True, "status": "ACCEPTED"}], "s is bool"),
-        ([{"Q": (0.9, 0.9, True), "s": 0.5, "status": "ACCEPTED"}], "Q contains bool"),
-        ([{"Q": (0.9, 0.9, "0.8"), "s": 0.5, "status": "ACCEPTED"}], "Q contains str"),
-        ([{"Q": (0.9, 0.9, 0.8), "s": None, "status": "ACCEPTED"}], "s is None"),
-        ([{"Q": (0.9, 0.9, float("nan")), "s": 0.5, "status": "ACCEPTED"}], "Q contains NaN"),
-        ([{"Q": (0.9, 0.9, float("inf")), "s": 0.5, "status": "ACCEPTED"}], "Q contains +Inf"),
-        ([{"Q": (0.9, 0.9, float("-inf")), "s": 0.5, "status": "ACCEPTED"}], "Q contains -Inf"),
-        ([{"Q": (0.9, 0.9, 0.8), "s": float("nan"), "status": "ACCEPTED"}], "s is NaN"),
-        ([{"Q": (0.9, 0.9, 0.8), "s": float("inf"), "status": "ACCEPTED"}], "s is +Inf"),
-        ([{"Q": (0.9, 0.9, 0.8), "s": float("-inf"), "status": "ACCEPTED"}], "s is -Inf"),
-    ]
-    for items, label in bad_cases:
-        if validate_inputs(items):
-            print(f"  FAIL: invalid input accepted ({label})")
-            all_ok = False
-        else:
-            print(f"  PASS: invalid input rejected ({label})")
-
-    return all_ok
-
-
-def check_raw_weights() -> bool:
-    """
-    Verify raw weights against independent reference values.
-
-    Note on independence: the reference values below were computed
-    independently using high-precision arithmetic before being hard-coded
-    here. They are not derived from `raw_weight()`; the comparison tests
-    whether the implementation matches the mathematical definition.
-    """
-    print("\n" + "-" * 78)
-    print("CHECK 1 — Raw weights (independent reference values)")
-    print("-" * 78)
-    references = [
-        ((0.9, 0.9, 0.8), 0.8653497422),
-        ((0.8, 0.8, 0.9), 0.8320335292),
-        ((0.2, 0.9, 0.8), 0.5241482788),
-        ((0.9, 0.25, 0.9), 0.5872301462),
-        ((0.1, 0.1, 0.1), 0.1000000000),
-        ((0.31, 0.9, 0.8), 0.6065939346),
-        ((0.29, 0.9, 0.8), 0.5932578563),
-        ((0.9, 0.9, 0.3), 0.6240251469),
-    ]
-    ok = True
-    for q, expected in references:
-        got = raw_weight(q)
-        passed = abs(got - expected) < 1e-9
-        status = "PASS" if passed else "FAIL"
-        if not passed:
-            ok = False
-        print(f"  {q} → {got:.10f}  expected {expected:.10f}  [{status}]")
-    return ok
-
-
-def check_numerical_eligibility() -> bool:
-    """Verify numerical eligibility, including boundary values."""
-    print("\n" + "-" * 78)
-    print("CHECK 2 — Numerical eligibility (including boundaries)")
-    print("-" * 78)
-    references = [
-        ((0.9, 0.9, 0.8), 1, "well above thresholds"),
-        ((0.8, 0.8, 0.9), 1, "well above thresholds"),
-        ((0.2, 0.9, 0.8), 0, "q_1 below tau_c"),
-        ((0.9, 0.25, 0.9), 0, "q_2 below tau_c"),
-        ((0.1, 0.1, 0.1), 0, "all below tau_w"),
-        ((0.31, 0.9, 0.8), 1, "just above tau_c"),
-        ((0.29, 0.9, 0.8), 0, "just below tau_c"),
-        ((0.9, 0.9, 0.3), 1, "non-critical dim low"),
-        ((0.0, 0.9, 0.9), 0, "zero coordinate"),
-        ((0.30, 0.9, 0.8), 1, "critical exactly at tau_c"),
-        ((0.9, 0.30, 0.8), 1, "second critical at tau_c"),
-        ((0.9, 0.9, 0.40), 1, "max exactly at tau_w"),
-        ((0.35, 0.35, 0.35), 0, "max below tau_w"),
-        ((0.40, 0.30, 0.30), 1, "max exactly at tau_w, critical at tau_c"),
-    ]
-    ok = True
-    for q, expected, label in references:
-        got = numerical_eligibility(q)
-        passed = (got == expected)
-        status = "PASS" if passed else "FAIL"
-        if not passed:
-            ok = False
-        print(f"  {str(q):<22} A={got}  expected {expected}  [{status}]  ({label})")
-    return ok
-
-
-def check_classifications() -> bool:
-    """Verify classification outcomes, including inclusive boundaries."""
-    print("\n" + "-" * 78)
-    print("CHECK 3 — Classification outcomes (inclusive boundaries)")
-    print("-" * 78)
-    references = [
-        (0.70, "Supported"),
-        (-0.30, "Contradicted"),
-        (0.00, "Undetermined"),
-        (0.20, "Supported"),
-        (-0.20, "Contradicted"),
-        (0.19, "Undetermined"),
-        (-0.19, "Undetermined"),
-        (None, "Abstain"),
-    ]
-    ok = True
-    for value, expected in references:
-        got = classify(value)
-        passed = (got == expected)
-        status = "PASS" if passed else "FAIL"
-        if not passed:
-            ok = False
-        display = "⊥" if value is None else f"{value:+.2f}"
-        print(f"  S={display:>6} → {got:<14} expected {expected:<14} [{status}]")
-    return ok
-
-
-def check_aggregate_outputs() -> bool:
-    """Verify aggregate outputs against published values."""
-    print("\n" + "-" * 78)
-    print("CHECK 4 — Aggregate outputs (Appendix A.3)")
-    print("-" * 78)
-    expected = {
-        "A":  {"M0": 0.7000, "M1": 0.7020, "M1'": 0.7020, "M2": 0.7020},
-        "B":  {"M0": -0.0500, "M1": 0.1587, "M1'": 0.1587, "M2": 0.8000},
-        "C":  {"M0": 0.8500, "M1": 0.8404, "M1'": 0.8404, "M2": 0.8000},
-        "D":  {"M0": 0.0000, "M1": 0.0157, "M1'": 0.0157, "M2": 0.0157},
-        "E":  {"M0": -0.0500, "M1": 0.5276, "M1'": 0.5276, "M2": None},
-        "F":  {"M0": 0.7500, "M1": 0.7506, "M1'": 0.7506, "M2": 0.8000},
-        "G":  {"M0": 0.7000, "M1": 0.7020, "M1'": 0.7020, "M2": 0.7020},
-        "H":  {"M0": 0.7500, "M1": 0.7581, "M1'": 0.7581, "M2": 0.7581},
-        "I":  {"M0": 0.7000, "M1": 0.7020, "M1'": 0.8000, "M2": 0.8000},
-    }
-    tolerance = 5e-4
-    ok = True
-    for case_name, exp in expected.items():
-        for model, e in exp.items():
-            got = aggregate(CASES[case_name], model)
-            if e is None:
-                passed = (got is None)
-            else:
-                passed = (got is not None) and (abs(got - e) < tolerance)
-            status = "PASS" if passed else "FAIL"
-            if not passed:
-                ok = False
-            print(f"  Case {case_name:>2} | {model:<3} | "
-                  f"expected {str(e):>7} | got {fmt(got):>7} | {status}")
-    return ok
-
-
-def check_removal_bound() -> bool:
-    """Verify that removal-sensitivity bounds hold in case G."""
-    print("\n" + "-" * 78)
-    print("CHECK 5 — Removal-sensitivity bound (case G)")
-    print("-" * 78)
-    ok = True
-    for model, r in removal_sensitivity_G().items():
-        if r["actual_change"] is None or r["bound"] is None:
-            print(f"  FAIL: {model}: removal bound is undefined")
-            ok = False
-            continue
-        passed = r["actual_change"] <= r["bound"] + 1e-12
-        status = "PASS" if passed else "FAIL"
-        if not passed:
-            ok = False
-        print(f"  {model}: |Δ|={r['actual_change']:.6f} ≤ "
-              f"bound={r['bound']:.6f}  [{status}]")
-    return ok
-
-
-# ============================================================
-# 7. Runner that aggregates all check results
-# ============================================================
-
-def run_all_checks() -> bool:
-    checks: List[Tuple[str, Callable[[], bool]]] = [
-        ("Input validation", check_input_validation),
-        ("Raw weights", check_raw_weights),
-        ("Numerical eligibility", check_numerical_eligibility),
-        ("Classifications", check_classifications),
-        ("Aggregate outputs", check_aggregate_outputs),
-        ("Removal bound", check_removal_bound),
-    ]
-    print("\n" + "=" * 78)
-    print("RUNNING ALL CHECKS")
-    print("=" * 78)
-    results: List[bool] = []
-    for name, check in checks:
-        try:
-            result = check()
-            if result is None:
-                print(f"WARNING: {name} did not return a boolean.")
-                results.append(False)
-            else:
-                results.append(result)
-        except Exception as exc:
-            print(f"ERROR: {name}: {exc}")
-            results.append(False)
-
-    print("\n" + "=" * 78)
-    print("CHECK SUMMARY")
-    print("=" * 78)
-    for (name, _), passed in zip(checks, results):
-        status = "PASS" if passed else "FAIL"
-        print(f"  {name:<28} [{status}]")
-    return all(results)
-
-
-# ============================================================
-# 8. Entry point
-# ============================================================
-
-if __name__ == "__main__":
-    # Guard: refuse to run on invalid data
-    if not all(validate_inputs(items) for items in CASES.values()):
-        print("\nABORT: invalid input detected. Fix the data before running.")
-        raise SystemExit(1)
-
-    print_raw_weights_and_eligibility()
-    print_aggregates()
-    print_classifications()
-    print_removal_case_G()
-
-    all_pass = run_all_checks()
-
-    print("\n" + "=" * 78)
-    print(f"OVERALL: {'ALL CHECKS PASSED' if all_pass else 'SOME CHECKS FAILED'}")
-    print("=" * 78)
-
-    raise SystemExit(0 if all_pass else 1)
+if __name__ == '__main__':
+    raise SystemExit(0 if run_checks() else 1)
